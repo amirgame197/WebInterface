@@ -1,0 +1,4 @@
+Flask-SocketIO
+python-dotenv
+eventlet
+Flask

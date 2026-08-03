@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/x-icon" href="/static/images/favicon.ico">
+    <title>{{ title_name }}</title>
+    <link rel="stylesheet" href="/static/css/index.style.css">
+</head>
+<body>
+    <!-- Authentication Modal -->
+    <div id="authModal" class="auth-modal">
+        <div class="auth-container">
+            <div class="auth-header">
+                <h1>🔐 {{ title_name }}</h1>
+                <p>Please authenticate to continue</p>
+            </div>
+            <form id="authForm" class="auth-form">
+                <div class="form-group">
+                    <label for="username">Username</label>
+                    <input type="text" id="username" name="username" required autocomplete="username">
+                </div>
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" name="password" required autocomplete="current-password">
+                </div>
+                <button type="submit" class="btn btn-primary">Login</button>
+                <div id="authError" class="auth-error"></div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div id="mainContent" class="main-content" style="display: none;">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <h1>{{ title_name }}</h1>
+                <div class="header-controls">
+                    <button id="themeToggle" class="btn-icon" title="Toggle Theme">
+                        <span class="theme-icon">🌙</span>
+                    </button>
+                    <div class="status-indicator">
+                        <span id="connectionStatus" class="status-dot"></span>
+                        <span id="connectionText">Connecting...</span>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Dashboard -->
+        <main class="dashboard">
+            <!-- Process Section -->
+            <section class="card">
+                <div class="card-header">
+                    <h2>🌐 Process Terminal</h2>
+                </div>
+                <div class="card-content">
+                    <div id="processOutput" class="process-output"></div>
+                    <br>
+                    <input type="text" class="execute-command-value" style="min-width: 100%;" id="executeCommandValue" required placeholder="Execute Command...">
+                    <button type="submit" id="executeCommand" class="btn btn-primary" style="font-size: 26px; font-weight: 500; padding: 2px 14px; margin-left: calc(100% - 50px); margin-top: 10px;">⏎</button>
+                </div>
+            </section>
+
+            <!-- Power Section -->
+            <section class="card">
+                <div class="card-header">
+                    <h2>⚡ Power Controls</h2>
+                </div>
+                <div class="card-content">
+                    <div class="power-buttons">
+                        <button id="restartBtn" class="btn btn-danger">⟲ Restart</button>
+                        <button id="shutdownBtn" class="btn btn-danger">⏻ Shutdown</button>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+    
+    <!-- Result Modal -->
+    <div id="resultModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="resultModalTitle">Result</h3>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="resultModalContent" class="result-content"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Confirmation Modal -->
+    <div id="confirmModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="confirmModalTitle">Confirm Action</h3>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p id="confirmModalMessage"></p>
+                <div class="modal-buttons">
+                    <button id="confirmYes" class="btn btn-danger">Yes</button>
+                    <button id="confirmNo" class="btn btn-secondary">No</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/libs/socket.io.min.js"></script>
+    <script src="/static/js/index.app.js"></script>
+</body>
+</html>

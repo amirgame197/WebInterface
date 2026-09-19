@@ -1,9 +1,12 @@
-import eventlet; eventlet.monkey_patch()
+from gevent import monkey; monkey.patch_all()
+
 from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO, emit, disconnect
+from geventwebsocket.handler import WebSocketHandler
 from datetime import datetime, timedelta
+from gevent.pywsgi import WSGIServer
 from collections import deque
-from eventlet import wsgi
+from html import escape
 from config import *
 import subprocess
 import threading
@@ -15,54 +18,60 @@ import re
 app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
 app.config['MAX_CONTENT_LENGTH'] = MAX_CONTENT_LENGTH
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet", max_size=MAX_CONTENT_LENGTH)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="gevent", max_size=MAX_CONTENT_LENGTH)
 
 authenticated_sessions = {}
 session_lock = threading.Lock()
+ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
 process = None
 process_lock = threading.Lock()
-process_log_buffer = deque(maxlen=400) # keep recent output to show on new connections
+process_log_buffer = deque(maxlen=PROCESS_MAX_LINES) # ? Keep recent output to show on new connections
 process_reader_thread = None
 _process_stop_requested = False
 
-ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-
 def check_auth(username, password):
-    """Verify username and password"""
+    """Verify username and password
+    """
     return username == USERNAME and password == PASSWORD
 
 
 def get_client_ip():
-    """Get the client's IP address"""
+    """Get the client's IP address
+    """
     if request.environ.get('HTTP_X_FORWARDED_FOR'):
         return request.environ['HTTP_X_FORWARDED_FOR'].split(',')[0]
     return request.environ.get('REMOTE_ADDR', 'unknown')
 
 
 def is_authenticated(ip):
-    """Check if the IP is authenticated and session hasn't expired"""
+    """Check if the IP is authenticated and session hasn't expired
+    """
     with session_lock:
         if ip in authenticated_sessions:
             last_activity = authenticated_sessions[ip]
             if datetime.now() - last_activity < timedelta(seconds=SESSION_TIMEOUT):
                 return True
+            
             else:
-                # Session expired
+                # ! Session expired
                 del authenticated_sessions[ip]
                 print(f"[AUTH] Session expired for IP: {ip}", flush=True)
                 return False
+            
         return False
 
 
 def update_session(ip):
-    """Update the last activity time for a session"""
+    """Update the last activity time for a session
+    """
     with session_lock:
         authenticated_sessions[ip] = datetime.now()
 
 
 def start_process():
-    """Start the configured process if not running. Non-blocking."""
+    """Start the configured process if not running
+    """
     global process, process_reader_thread, _process_stop_requested
 
     with process_lock:
@@ -76,7 +85,7 @@ def start_process():
 
         try:
             print(f"[PROCESS] Starting process: {cmd} (cwd={cwd})", flush=True)
-            # use shell=True because PROCESS_CMD is a single string from config
+            # ? Use shell=True because PROCESS_CMD is a single string from config
             process = subprocess.Popen(
                 cmd,
                 cwd=cwd,
@@ -88,42 +97,47 @@ def start_process():
                 universal_newlines=True,
                 start_new_session=True,
             )
+        
         except Exception as e:
             print(f"[PROCESS] Failed to start process: {e}", flush=True)
             process = None
             return
 
-        # start reader thread
+        # # Start reader thread
         def _reader():
             global process, _process_stop_requested
             try:
                 if not process or not process.stdout:
                     return
+                
                 for raw in iter(process.stdout.readline, ''):
                     if raw is None:
                         break
+
                     line = raw.rstrip('\n')
                     if line:
                         process_log_buffer.append(ansi_escape.sub('', line))
-                        # broadcast line to authenticated clients
+                        # ? Broadcast line to authenticated clients
                         try:
                             socketio.emit('process_output', {'process_output': ansi_escape.sub('', line)})
                             print("[PROCESS]", line, flush=True)
-                        except Exception:
-                            # best-effort; continue
-                            pass
+                        except Exception: pass
+
                     if _process_stop_requested:
                         break
+                
             except Exception as e:
                 print(f"[PROCESS] Reader thread error: {e}", flush=True)
+            
             finally:
-                # if process exited, notify clients
+                # ? If process exited, notify clients
                 exitcode = None
                 try:
                     if process:
                         exitcode = process.poll()
                 except Exception:
                     pass
+
                 socketio.emit('process_output', {'process_output': f'<font color="#ad3737">[INTERFACE] Process terminated (exitcode={exitcode})</font>'})
                 process_log_buffer.append(f'<font color="#ad3737">[INTERFACE] Process terminated (exitcode={exitcode})</font>')
                 print("[PROCESS] Reader thread exiting", flush=True)
@@ -134,7 +148,8 @@ def start_process():
 
 
 def kill_process():
-    """Request stop of process (kill the whole process group)."""
+    """Request stop of process (kill the whole process group)
+    """
     global process, _process_stop_requested
 
     with process_lock:
@@ -143,16 +158,29 @@ def kill_process():
             return True, None
         pid = process.pid
 
-    # since start_new_session=True, pid == pgid
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    except Exception:
+    if os.name == 'nt':
         try:
-            os.kill(pid, signal.SIGKILL)
+            subprocess.run(
+                ['taskkill', '/F', '/T', '/PID', str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
         except Exception:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+    else:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
             pass
+        except Exception:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
 
     with process_lock:
         exitcode = None
@@ -167,13 +195,19 @@ def kill_process():
 
 @app.route('/')
 def index():
-    """Display the main page"""
-    return render_template('index.html', title_name=TITLE_NAME)
+    """Display the main page
+    """
+    return render_template(
+        'index.html',
+        title_name=TITLE_NAME,
+        theme_colors=THEME_COLORS,
+    )
 
 
 @app.route('/api/auth', methods=['POST'])
 def authenticate():
-    """Authenticate user and create session"""
+    """Authenticate user and create session
+    """
     try:
         data = request.get_json()
         username = data.get('username', '')
@@ -189,9 +223,11 @@ def authenticate():
             update_session(client_ip)
             print(f"[AUTH] Authentication successful for IP: {client_ip}", flush=True)
             return jsonify({'success': True, 'message': 'Authentication successful'})
+        
         else:
             print(f"[AUTH] Authentication failed for IP: {client_ip}", flush=True)
             return jsonify({'success': False, 'message': 'Invalid credentials'}), 401
+        
     except Exception as e:
         print(f"[ERROR] Authentication error: {e}", flush=True)
         return jsonify({'success': False, 'message': 'Server error'}), 500
@@ -199,7 +235,8 @@ def authenticate():
 
 @app.route('/api/check-auth', methods=['GET'])
 def check_authentication():
-    """Check if the client is authenticated"""
+    """Check if the client is authenticated
+    """
     client_ip = get_client_ip()
     
     if is_authenticated(client_ip):
@@ -211,7 +248,8 @@ def check_authentication():
 
 @socketio.on('connect')
 def handle_connect():
-    """Handle client connection"""
+    """Handle client connection
+    """
     client_ip = get_client_ip()
     print(f"[SOCKET] Client connected: {client_ip}", flush=True)
     
@@ -222,26 +260,29 @@ def handle_connect():
     
     update_session(client_ip)
     print(f"[SOCKET] Authenticated client connected: {client_ip}", flush=True)
-    
     emit('process_output', {'process_output': '<font color="#039b16">[INTERFACE] Connected to backend.</font>'})
+
     try:
         if process_log_buffer:
             for line in list(process_log_buffer):
                 emit('process_output', {'process_output': ansi_escape.sub('', line)})
+    
     except Exception as e:
         print(f"[SOCKET] failed to send initial process buffer: {e}", flush=True)
 
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    """Handle client disconnection"""
+    """Handle client disconnection
+    """
     client_ip = get_client_ip()
     print(f"[SOCKET] Client disconnected: {client_ip}", flush=True)
 
 
 @socketio.on('ping')
 def handle_ping():
-    """Handle ping from client to keep session alive"""
+    """Handle ping from client to keep session alive
+    """
     client_ip = get_client_ip()
     
     if not is_authenticated(client_ip):
@@ -254,7 +295,8 @@ def handle_ping():
 
 @socketio.on('execute_command')
 def on_execute_command(data):
-    """Receive a command from client and forward it to the process stdin."""
+    """Receive a command from client and forward it to the process stdin
+    """
     ip = get_client_ip()
     if not is_authenticated(ip):
         disconnect()
@@ -266,63 +308,69 @@ def on_execute_command(data):
 
     with process_lock:
         if not process or process.poll() is not None:
-            emit('process_output', {'process_output': '<font color="#ad3737">[INTERFACE] Process not running. Please restart to run it.</font>'})
+            emit('process_output', {'process_output': '<font color="#ad3737">[INTERFACE] Process not running. Please restart (reboot cmd) to run it.</font>'})
             return
 
         if process and process.stdin and process.poll() is None:
             try:
-                # write command and flush
+                # ? Write command and flush
+                command_output = '<span class="prompt-prefix">$</span> ' + escape(cmd)
+                process_log_buffer.append(command_output)
+                socketio.emit('process_output', {'process_output': command_output})
+
                 process.stdin.write(cmd + "\n")
                 process.stdin.flush()
-                emit('process_output', {'process_output': f">> {cmd}"})
-                process_log_buffer.append(f">> {cmd}")
+            
             except Exception as e:
                 emit('process_output', {'process_output': f'<font color="#ad3737">[INTERFACE] Failed to send command: {e}</font>'})
+        
         else:
             emit('process_output', {'process_output': '<font color="#ad3737">[INTERFACE] Unable to send command; Process unavailable.</font>'})
 
 
 @socketio.on('restart_process')
 def handle_restart_process():
-    """Stop the process (if running) then start it again."""
+    """Stop the process (if running) then start it again
+    """
     ip = get_client_ip()
     if not is_authenticated(ip):
         disconnect()
         return
     update_session(ip)
 
-    emit('process_output', {'process_output': '<font color="#f0ad4e">[INTERFACE] Restart requested...</font>'})
+    socketio.emit('process_output', {'process_output': '<font color="#f0ad4e">[INTERFACE] Restart requested...</font>'})
     process_log_buffer.append('<font color="#f0ad4e">[INTERFACE] Restart requested...</font>')
 
     stopped, exitcode = kill_process()
-    emit('process_output', {'process_output': f'<font color="#ad3737">[INTERFACE] Process stopped for restart (exitcode={exitcode})</font>'})
+    socketio.emit('process_output', {'process_output': f'<font color="#ad3737">[INTERFACE] Process stopped for restart (exitcode={exitcode})</font>'})
     process_log_buffer.append(f'<font color="#ad3737">[INTERFACE] Process stopped for restart (exitcode={exitcode})</font>')
 
-    # small pause to let things settle, then start
+    # ? Small pause to let things settle, then start
     time.sleep(1)
     start_process()
-    emit('process_output', {'process_output': '<font color="#039b16">[INTERFACE] Process restarted.</font>'})
+    socketio.emit('process_output', {'process_output': '<font color="#039b16">[INTERFACE] Process restarted.</font>'})
     process_log_buffer.append('<font color="#039b16">[INTERFACE] Process restarted.</font>')
 
 
 @socketio.on('shutdown_process')
 def handle_shutdown_process():
-    """Stop the process (if running) and leave it inactive. Inform clients to restart to run again."""
+    """Stop the process (if running) and leave it inactive. Inform clients to restart to run again
+    """
     ip = get_client_ip()
     if not is_authenticated(ip):
         disconnect()
         return
     update_session(ip)
 
-    emit('process_output', {'process_output': '<font color="#f0ad4e">[INTERFACE] Shutdown requested...</font>'})
+    socketio.emit('process_output', {'process_output': '<font color="#f0ad4e">[INTERFACE] Shutdown requested...</font>'})
     process_log_buffer.append('<font color="#f0ad4e">[INTERFACE] Shutdown requested...</font>')
 
     stopped, exitcode = kill_process()
-    inactive_msg = f'<font color="#ad3737">[INTERFACE] Process is inactive (exitcode={exitcode}). Please restart to run it.</font>'
-    emit('process_output', {'process_output': inactive_msg})
+    inactive_msg = f'<font color="#ad3737">[INTERFACE] Process is inactive (exitcode={exitcode}). Please restart (reboot cmd) to run it.</font>'
+    socketio.emit('process_output', {'process_output': inactive_msg})
     process_log_buffer.append(inactive_msg)
 
 if __name__ == '__main__':
     start_process()
-    #socketio.run(app, host=SERVER_IP, port=SERVER_PORT)
-    wsgi.server(eventlet.listen((SERVER_IP, SERVER_PORT)), app)
+    print(f"wsgi starting up on http://{SERVER_IP}:{SERVER_PORT}", flush=True)
+    WSGIServer((SERVER_IP, SERVER_PORT), app, handler_class=WebSocketHandler).serve_forever()

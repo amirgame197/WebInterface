@@ -1,4 +1,4 @@
-# I'm just a test thingy for command execution in the web interface. To test, uncomment the config.py stuff.
+# ? I'm just a test thingy for command execution in the web interface. To test, uncomment the config.py stuff.
 
 import sys
 import time

@@ -1,360 +1,547 @@
 (function() {
     'use strict';
 
-    // State
-    let socket = null;
-    let pingInterval = null;
-
-    // DOM Elements
-    const elements = {
-        authModal: null,
-        authForm: null,
-        authError: null,
-        mainContent: null,
-        themeToggle: null,
-        connectionStatus: null,
-        connectionText: null,
-        processOutput: null,
-        executeCommand: null,
-        executeCommandValue: null,
-        resultModal: null,
-        resultModalTitle: null,
-        resultModalContent: null,
-        confirmModal: null,
-        confirmModalTitle: null,
-        confirmModalMessage: null,
-        confirmYes: null,
-        confirmNo: null,
-        restartBtn: null,
-        shutdownBtn: null
+    // ! ==============================
+    // ! State
+    // ! ==============================
+    const State = {
+        BOOT:           'boot',
+        AUTH:           'auth',
+        AUTHENTICATING: 'authenticating',
+        COMMAND:        'command',
+        CONFIRM:        'confirm',
+        RECONNECTING:   'reconnecting'
     };
 
-    // Initialize
-    function init() {
-        console.log('[CLIENT] Initializing Mindustry Console...');
-        
-        // Get DOM elements
-        getDOMElements();
-        
-        // Setup event listeners
-        setupEventListeners();
-        
-        // Load theme
-        loadTheme();
-        
-        // Check authentication
-        checkAuth();
+    let state = State.BOOT;
+    let socket = null;
+    let pingInterval = null;
+    let spinnerInterval = null;
+    let pendingPowerAction = null;
+    let lastAuthCheck = 0;
+
+    // ! ==============================
+    // ! DOM references
+    // ! ==============================
+    const $ = (id) => document.getElementById(id);
+    const els = {
+        form:           $('terminalForm'),
+        output:         $('terminalOutput'),
+        usernameLine:   $('usernameLine'),
+        passwordLine:   $('passwordLine'),
+        commandLine:    $('commandLine'),
+        confirmLine:    $('confirmLine'),
+        usernameInput:  $('usernameInput'),
+        passwordInput:  $('passwordInput'),
+        commandInput:   $('commandInput'),
+        confirmInput:   $('confirmInput'),
+        commandPrompt:  $('commandPrompt'),
+        confirmPrompt:  $('confirmPrompt')
+    };
+
+    const MAX_LINES = 5000;
+
+    // ! ==============================
+    // ! Output helpers
+    // ! ==============================
+    function escapeHtml(s) {
+        return String(s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
 
-    function getDOMElements() {
-        elements.authModal = document.getElementById('authModal');
-        elements.authForm = document.getElementById('authForm');
-        elements.authError = document.getElementById('authError');
-        elements.mainContent = document.getElementById('mainContent');
-        elements.themeToggle = document.getElementById('themeToggle');
-        elements.connectionStatus = document.getElementById('connectionStatus');
-        elements.connectionText = document.getElementById('connectionText');
-        elements.resultModal = document.getElementById('resultModal');
-        elements.resultModalTitle = document.getElementById('resultModalTitle');
-        elements.resultModalContent = document.getElementById('resultModalContent');
-        elements.confirmModal = document.getElementById('confirmModal');
-        elements.confirmModalTitle = document.getElementById('confirmModalTitle');
-        elements.confirmModalMessage = document.getElementById('confirmModalMessage');
-        elements.confirmYes = document.getElementById('confirmYes');
-        elements.confirmNo = document.getElementById('confirmNo');
-        elements.processOutput = document.getElementById('processOutput');
-        elements.executeCommand = document.getElementById('executeCommand');
-        elements.executeCommandValue = document.getElementById('executeCommandValue');
-        elements.restartBtn = document.getElementById('restartBtn');
-        elements.shutdownBtn = document.getElementById('shutdownBtn');
+    function print(text, cls) {
+        const line = document.createElement('div');
+        line.className = 'line' + (cls ? ' ' + cls : '');
+        line.textContent = text == null ? '' : String(text);
+        els.output.appendChild(line);
+        trimLines();
+        scrollToBottom();
+        return line;
     }
 
-    function setupEventListeners() {
-        // Auth form
-        elements.authForm.addEventListener('submit', handleAuth);
-        
-        // Theme toggle
-        elements.themeToggle.addEventListener('click', toggleTheme);
-        
-        // Power buttons
-        elements.restartBtn.addEventListener('click', () => confirmPowerAction('restart'));
-        elements.shutdownBtn.addEventListener('click', () => confirmPowerAction('shutdown'));
-        
-        // Modal close buttons
-        document.querySelectorAll('.modal-close').forEach(btn => {
-            btn.addEventListener('click', function() {
-                const modal = this.closest('.modal');
-                hideModal(modal);
-            });
-        });
-        
-        // Click outside modal to close
-        document.querySelectorAll('.modal').forEach(modal => {
-            modal.addEventListener('click', function(e) {
-                if (e.target === this) {
-                    hideModal(this);
-                }
-            });
-        });
+    function printHTML(html, cls) {
+        const line = document.createElement('div');
+        line.className = 'line' + (cls ? ' ' + cls : '');
+        line.innerHTML = html;
+        els.output.appendChild(line);
+        trimLines();
+        scrollToBottom();
+        return line;
+    }
 
-        // Confirm modal buttons
-        elements.confirmNo.addEventListener('click', () => hideModal(elements.confirmModal));
+    function sanitizeProcessOutput(html) {
+        const parsed = new DOMParser().parseFromString(html, 'text/html');
+        const container = document.createElement('div');
 
-        // Execute button
-        elements.executeCommand.addEventListener('click', handleExecuteCommand);
-        elements.executeCommandValue.addEventListener('keydown', function(event) {
-            if (event.key === 'Enter' && !event.shiftKey) {
-                event.preventDefault();
-                handleExecuteCommand(event);
+        function appendNode(node, parent) {
+            if (node.nodeType === Node.TEXT_NODE) {
+                parent.appendChild(document.createTextNode(node.nodeValue));
+                return;
             }
-        });
+
+            if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+            if (node.tagName.toLowerCase() === 'font') {
+                const font = document.createElement('font');
+                const color = node.getAttribute('color');
+                if (color && /^#[0-9a-f]{3,8}$/i.test(color)) {
+                    font.setAttribute('color', color);
+                }
+                parent.appendChild(font);
+                Array.from(node.childNodes).forEach((child) => appendNode(child, font));
+                return;
+            }
+
+            if (
+                node.tagName.toLowerCase() === 'span' &&
+                node.getAttribute('class') === 'prompt-prefix'
+            ) {
+                const prompt = document.createElement('span');
+                prompt.className = 'prompt-prefix';
+                parent.appendChild(prompt);
+                Array.from(node.childNodes).forEach((child) => appendNode(child, prompt));
+                return;
+            }
+
+            Array.from(node.childNodes).forEach((child) => appendNode(child, parent));
+        }
+
+        Array.from(parsed.body.childNodes).forEach((node) => appendNode(node, container));
+        return container.innerHTML;
     }
 
-    // Authentication
+    function trimLines() {
+        while (els.output.children.length > MAX_LINES) {
+            els.output.removeChild(els.output.firstChild);
+        }
+    }
+
+    function scrollToBottom() {
+        els.output.scrollTop = els.output.scrollHeight;
+    }
+
+    // ! ==============================
+    // ! Input line control
+    // ! ==============================
+    function clearInputLines() {
+        els.usernameLine.classList.remove('active');
+        els.passwordLine.classList.remove('active');
+        els.commandLine.classList.remove('active');
+        els.confirmLine.classList.remove('active');
+    }
+
+    function setState(newState) {
+        state = newState;
+        clearInputLines();
+
+        switch (newState) {
+            case State.AUTH:
+                els.usernameLine.classList.add('active');
+                els.passwordLine.classList.add('active');
+
+                // ? Focus username if empty, else password
+                if (els.usernameInput.value) {
+                    els.passwordInput.focus();
+                } else {
+                    els.usernameInput.focus();
+                }
+                break;
+
+            case State.COMMAND:
+                els.commandLine.classList.add('active');
+                els.commandInput.focus();
+                break;
+
+            case State.CONFIRM:
+                els.confirmLine.classList.add('active');
+                els.confirmInput.focus();
+                break;
+
+            // ? No input for other states
+        }
+    }
+
+    const SPINNER_FRAMES = ['\u280B', '\u2819', '\u2839', '\u2838', '\u283C', '\u2834', '\u2826', '\u2827', '\u2807', '\u280F'];
+    let spinnerLine = null;
+    let spinnerFrameIdx = 0;
+
+    function startSpinner(text) {
+        stopSpinner();
+        spinnerLine = document.createElement('div');
+        spinnerLine.className = 'line dim';
+        spinnerLine.innerHTML =
+            '<span class="spinner">' + SPINNER_FRAMES[0] + '</span>' +
+            escapeHtml(text);
+        els.output.appendChild(spinnerLine);
+        scrollToBottom();
+
+        spinnerInterval = setInterval(() => {
+            spinnerFrameIdx = (spinnerFrameIdx + 1) % SPINNER_FRAMES.length;
+            const s = spinnerLine.querySelector('.spinner');
+            if (s) s.textContent = SPINNER_FRAMES[spinnerFrameIdx];
+        }, 80);
+    }
+
+    function stopSpinner() {
+        if (spinnerInterval) {
+            clearInterval(spinnerInterval);
+            spinnerInterval = null;
+        }
+        if (spinnerLine) {
+            spinnerLine.remove();
+            spinnerLine = null;
+        }
+    }
+
+    // ! ==============================
+    // ! Authentication
+    // ! ==============================
     async function checkAuth() {
         try {
             const response = await fetch('/api/check-auth');
             const data = await response.json();
-            
             if (data.authenticated) {
-                console.log('[AUTH] Already authenticated');
-                onAuthSuccess();
+                connectSocket();
             } else {
-                console.log('[AUTH] Not authenticated');
-                showAuthModal();
+                print('Authentication required.', 'warning');
+                setState(State.AUTH);
             }
-        } catch (error) {
-            console.error('[AUTH] Error checking authentication:', error);
-            showAuthModal();
+        } catch (err) {
+            print('Failed to reach server: ' + err.message, 'error');
+            setState(State.AUTH);
         }
     }
 
-    function showAuthModal() {
-        elements.authModal.style.display = 'flex';
-        elements.mainContent.style.display = 'none';
+    function startAuthSequence(message) {
+        if (message) print(message, 'warning');
+        els.passwordInput.value = '';
+        els.commandInput.value = '';
+        setState(State.AUTH);
     }
 
-    function hideAuthModal() {
-        elements.authModal.style.display = 'none';
-        elements.mainContent.style.display = 'block';
-    }
+    function requireAuthentication(message) {
+        if (state === State.AUTH || state === State.AUTHENTICATING) return;
 
-    async function handleAuth(e) {
-        e.preventDefault();
-        
-        const username = document.getElementById('username').value;
-        const password = document.getElementById('password').value;
-        
-        elements.authError.textContent = '';
-        
-        try {
-            const response = await fetch('/api/auth', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ username, password })
-            });
-            
-            const data = await response.json();
-            
-            if (data.success) {
-                console.log('[AUTH] Authentication successful');
-                onAuthSuccess();
-            } else {
-                elements.authError.textContent = data.message || 'Authentication failed';
-            }
-        } catch (error) {
-            console.error('[AUTH] Authentication error:', error);
-            elements.authError.textContent = 'Connection error';
+        if (socket) {
+            try {
+                socket.io.opts.reconnection = false;
+                socket.removeAllListeners();
+                socket.disconnect();
+            } catch (e) {}
+            socket = null;
         }
-    }
-
-    function onAuthSuccess() {
-        hideAuthModal();
-        connectSocket();
-    }
-
-    // Socket.IO Connection
-    function connectSocket() {
-        console.log('[SOCKET] Connecting to server...');
-        
-        updateConnectionStatus('connecting', 'Connecting...');
-        
-        socket = io({
-            reconnection: true,
-            reconnectionDelay: 5000,
-            reconnectionAttempts: Infinity
-        });
-        
-        socket.on('connect', onSocketConnect);
-        socket.on('disconnect', onSocketDisconnect);
-        socket.on('connect_error', onSocketError);
-        socket.on('process_output', onProcessOutput);
-        socket.on('pong', onPong);
-    }
-
-    function onSocketConnect() {
-        console.log('[SOCKET] Connected to server');
-        updateConnectionStatus('connected', 'Connected');
-        
-        // Start ping interval
-        if (pingInterval) {
-            clearInterval(pingInterval);
-        }
-        pingInterval = setInterval(() => {
-            if (socket && socket.connected) {
-                socket.emit('ping');
-            }
-        }, 3000);
-    }
-
-    function onSocketDisconnect() {
-        console.log('[SOCKET] Disconnected from server');
-        updateConnectionStatus('disconnected', 'Disconnected');
-        
         if (pingInterval) {
             clearInterval(pingInterval);
             pingInterval = null;
         }
+
+        stopSpinner();
+        startAuthSequence(message || 'Session expired. Authentication required.');
     }
 
-    function onSocketError(error) {
-        console.error('[SOCKET] Connection error:', error);
-        updateConnectionStatus('disconnected', 'Connection Error');
+    async function submitAuth() {
+        const username = els.usernameInput.value.trim();
+        const password = els.passwordInput.value;
+
+        if (!username) {
+            print('Username is required.', 'error');
+            els.usernameInput.focus();
+            return;
+        }
+        if (!password) {
+            print('Password is required.', 'error');
+            els.passwordInput.focus();
+            return;
+        }
+
+        // ? Echo credentials into the output (password masked)
+        print('login as: ' + username, 'faint');
+        print('Password: ' + '*'.repeat(password.length), 'faint');
+        els.passwordInput.value = '';
+
+        // ? Hide inputs, show spinner
+        setState(State.AUTHENTICATING);
+        startSpinner('Authenticating...');
+
+        try {
+            const response = await fetch('/api/auth', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password })
+            });
+            const data = await response.json();
+            stopSpinner();
+
+            if (data.success) {
+                print('Authenticated.', 'success');
+                connectSocket();
+            } else {
+                print('Authentication failed: ' + (data.message || 'Invalid credentials'), 'error');
+                startAuthSequence(null);
+            }
+        } catch (err) {
+            stopSpinner();
+            print('Connection error: ' + err.message, 'error');
+            startAuthSequence(null);
+        }
     }
 
-    function onPong(data) {
-        // Keep-alive response
-        console.log('[SOCKET] Pong received');
+    // ! ==============================
+    // ! Socket.IO setup
+    // ! ==============================
+    function connectSocket() {
+        stopSpinner();
+
+        // ? Clean up previous socket
+        if (socket) {
+            try {
+                socket.removeAllListeners();
+                socket.disconnect();
+            } catch (e) {}
+            socket = null;
+        }
+        if (pingInterval) {
+            clearInterval(pingInterval);
+            pingInterval = null;
+        }
+
+        if (state !== State.COMMAND) {
+            setState(State.RECONNECTING);
+        }
+        startSpinner('Connecting...');
+
+        socket = io({
+            reconnection: true,
+            reconnectionDelay: 2000,
+            reconnectionAttempts: Infinity,
+            timeout: 10000
+        });
+
+        socket.on('connect',         onSocketConnect);
+        socket.on('disconnect',      onSocketDisconnect);
+        socket.on('connect_error',   onSocketError);
+        socket.on('process_output',  onProcessOutput);
+        socket.on('pong',            onPong);
     }
 
-    function updateConnectionStatus(status, text) {
-        elements.connectionStatus.className = 'status-dot ' + status;
-        elements.connectionText.textContent = text;
+    function onSocketConnect() {
+        stopSpinner();
+        print(`Connected to ${TITLE_NAME}.`, 'success');
+        setState(State.COMMAND);
+
+        if (pingInterval) clearInterval(pingInterval);
+        pingInterval = setInterval(() => {
+            if (socket && socket.connected) socket.emit('ping');
+        }, 3000);
     }
 
-    // Process Output
+    function onSocketDisconnect(reason) {
+        console.log('[SOCKET] Disconnected:', reason);
+        if (pingInterval) {
+            clearInterval(pingInterval);
+            pingInterval = null;
+        }
+
+        if (reason === 'io server disconnect') {
+            checkAuth().catch(() => requireAuthentication());
+            return;
+        }
+
+        print('Connection lost.', 'warning');
+        startSpinner('Reconnecting...');
+        if (state !== State.RECONNECTING) {
+            setState(State.RECONNECTING);
+        }
+    }
+
+    async function onSocketError(err) {
+        console.log('[SOCKET] Error:', err);
+
+        const now = Date.now();
+        if (now - lastAuthCheck < 5000) {
+            if (!spinnerLine) startSpinner('Reconnecting...');
+            return;
+        }
+        lastAuthCheck = now;
+
+        // ? Determine if this is an auth failure (session expired)
+        try {
+            const response = await fetch('/api/check-auth');
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            const data = await response.json();
+            if (!data.authenticated) {
+                requireAuthentication();
+                return;
+            }
+        } catch (e) {
+            console.log('[AUTH CHECK] Failed:', e);
+        }
+
+        if (!spinnerLine) startSpinner('Reconnecting...');
+    }
+
+    function onPong() {}
+
     function onProcessOutput(data) {
-        console.log('[DATA] Process Output Received:', data);
-        
-        if (!data) {
-            elements.coreStatusContent.innerHTML = '<div class="loading">No Process Output Data Available.</div>';
-            return;
+        if (!data || typeof data.process_output !== 'string') return;
+        const lines = data.process_output.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+            printHTML(sanitizeProcessOutput(lines[i]));
         }
-        elements.processOutput.innerHTML += data.process_output + "\n";
-        elements.processOutput.scrollTo({
-            top: elements.processOutput.scrollHeight,
-            behavior: 'smooth'
-        });
     }
-    
-    // Command Execution
-    function handleExecuteCommand(e) {
-        e.preventDefault();
-        
-        const value = elements.executeCommandValue.value;
-        
-        console.log('[COMMAND] Executing:', value);
+
+    // ! ==============================
+    // ! Command handling
+    // ! ==============================
+    function submitCommand() {
+        const cmd = els.commandInput.value;
+        els.commandInput.value = '';
+
+        if (!cmd.trim()) return;
 
         if (!socket || !socket.connected) {
-            alert('Not connected to server');
+            print('Not connected.', 'error');
             return;
         }
-        
-        socket.emit('execute_command', { command: value});
-        
-        elements.executeCommandValue.value = '';
-    }
 
-    // Power Actions
-    function confirmPowerAction(action) {
-        console.log('[POWER] Confirming action:', action);
-        
-        const messages = {
-            restart: 'Are you sure you want to restart the process?',
-            shutdown: 'Are you sure you want to shutdown the process?'
-        };
-        
-        elements.confirmModalTitle.textContent = 'Confirm ' + (action === 'restart' ? 'Restart' : 'Shutdown');
-        elements.confirmModalMessage.textContent = messages[action];
-        
-        // Remove old event listener
-        const newConfirmYes = elements.confirmYes.cloneNode(true);
-        elements.confirmYes.parentNode.replaceChild(newConfirmYes, elements.confirmYes);
-        elements.confirmYes = newConfirmYes;
-        
-        // Add new event listener
-        elements.confirmYes.addEventListener('click', () => {
-            hideModal(elements.confirmModal);
-            executePowerAction(action);
-        });
-        
-        showModal(elements.confirmModal);
-    }
+        const lower = cmd.trim().toLowerCase();
 
-    function executePowerAction(action) {
-        console.log('[POWER] Executing action:', action);
+        if (lower === 'reboot') {
+            pendingPowerAction = 'restart';
+            els.confirmPrompt.textContent = 'Are you sure you want to reboot? [Y/N]';
+            setState(State.CONFIRM);
         
-        if (!socket || !socket.connected) {
-            alert('Not connected to server');
-            return;
-        }
+        } else if (lower === 'shutdown') {
+            pendingPowerAction = 'shutdown';
+            els.confirmPrompt.textContent = 'Are you sure you want to shutdown? [Y/N]';
+            setState(State.CONFIRM);
         
-        if (action === 'restart') {
-            socket.emit('restart_process');
-        } else if (action === 'shutdown') {
-            socket.emit('shutdown_process');
-        }
-    }
-
-    function onPowerActionResult(data) {
-        console.log('[POWER] Power action result:', data);
-        
-        elements.resultModalTitle.textContent = data.success ? 'Success' : 'Error';
-        elements.resultModalContent.className = 'result-content ' + (data.success ? 'success' : 'error');
-        elements.resultModalContent.textContent = data.message;
-        
-        showModal(elements.resultModal);
-    }
-
-    // Theme
-    function loadTheme() {
-        const theme = localStorage.getItem('theme') || 'dark';
-        applyTheme(theme);
-    }
-
-    function toggleTheme() {
-        const currentTheme = document.body.classList.contains('light-mode') ? 'light' : 'dark';
-        const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
-        applyTheme(newTheme);
-        localStorage.setItem('theme', newTheme);
-    }
-
-    function applyTheme(theme) {
-        if (theme === 'light') {
-            document.body.classList.add('light-mode');
-            elements.themeToggle.querySelector('.theme-icon').textContent = '☀️';
         } else {
-            document.body.classList.remove('light-mode');
-            elements.themeToggle.querySelector('.theme-icon').textContent = '🌙';
+            socket.emit('execute_command', { command: cmd });
+            // ? Emit the rest of the commands
         }
     }
 
-    // Modal Helpers
-    function showModal(modal) {
-        modal.classList.add('show');
+    function submitConfirm() {
+        const answer = els.confirmInput.value.trim().toLowerCase();
+        const action = pendingPowerAction;
+        pendingPowerAction = null;
+
+        // ? Echo the answer
+        print('[Y/N] ' + (answer ? answer.toUpperCase() : '(empty)'));
+        els.confirmInput.value = '';
+
+        if (answer === 'y' || answer === 'yes') {
+            if (socket && socket.connected && action) {
+
+                if (action === 'restart') {
+                    socket.emit('restart_process');
+                } else if (action === 'shutdown') {
+                    socket.emit('shutdown_process');
+                }
+
+                print('Sent ' + action + ' command.', 'dim');
+            } else {
+                print('Not connected.', 'error');
+            }
+        
+        } else if (answer === 'n' || answer === 'no') {
+            print('Cancelled.', 'dim');
+        } else {
+            print('Invalid input. Cancelled.', 'dim');
+        }
+
+        setState(State.COMMAND);
     }
 
-    function hideModal(modal) {
-        modal.classList.remove('show');
+    // ! ==============================
+    // ! Event listeners
+    // ! ==============================
+    function setupListeners() {
+        // ? Prevent native form submission & route to auth handler
+        els.form.addEventListener('submit', (e) => {
+            e.preventDefault();
+            if (state === State.AUTH) {
+                submitAuth();
+            }
+        });
+
+        // ? Enter on username should jump to password
+        els.usernameInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                if (els.usernameInput.value.trim()) {
+                    els.passwordInput.focus();
+                }
+            }
+        });
+
+        // ? Enter on password should submit authenticate
+        els.passwordInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                submitAuth();
+            }
+        });
+
+        // ? Enter on command should submit command
+        els.commandInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                submitCommand();
+            }
+        });
+
+        // ? Enter on confirm should submit confirm
+        els.confirmInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                submitConfirm();
+            }
+        });
+
+        // ? Clicking the terminal refocuses the active input unless user is selecting text or input
+        document.addEventListener('click', (e) => {
+            const tag = e.target.tagName;
+            if (tag === 'INPUT' || tag === 'BUTTON') return;
+
+            const sel = window.getSelection();
+            if (sel && sel.toString().length > 0) return;
+
+            const activeLine = document.querySelector('.terminal-input-line.active');
+            if (activeLine) {
+                const input = activeLine.querySelector('input');
+                if (input) input.focus();
+            }
+        });
+
+        // ? Refocus active input when window regains focus
+        window.addEventListener('focus', () => {
+            const activeLine = document.querySelector('.terminal-input-line.active');
+            if (activeLine) {
+                const input = activeLine.querySelector('input');
+                if (input && document.activeElement !== input) {
+                    input.focus();
+                }
+            }
+        });
     }
 
-    // Initialize on page load
+    // ! ==============================
+    // ! Init setup
+    // ! ==============================
+    function init() {
+        setupListeners();
+        checkAuth();
+    }
+
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
     } else {
         init();
     }
-
 })();

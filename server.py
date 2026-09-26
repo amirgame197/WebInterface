@@ -372,5 +372,5 @@ def handle_shutdown_process():
 
 if __name__ == '__main__':
     start_process()
-    print(f"wsgi starting up on http://{SERVER_IP}:{SERVER_PORT}", flush=True)
-    WSGIServer((SERVER_IP, SERVER_PORT), app, handler_class=WebSocketHandler).serve_forever()
+    print(f"wsgi starting up on http://{LISTEN_IP}:{LISTEN_PORT}", flush=True)
+    WSGIServer((LISTEN_IP, LISTEN_PORT), app, handler_class=WebSocketHandler).serve_forever()

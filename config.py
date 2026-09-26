@@ -24,8 +24,8 @@ SECRET_KEY = "HASH"
 MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # ? 16MB Max
 SESSION_TIMEOUT = 600  # ? 10 Minutes
 
-SERVER_IP = "0.0.0.0"
-SERVER_PORT = 0000
+LISTEN_IP = "0.0.0.0"
+LISTEN_PORT = 0000
 
 # # #################### Process settings ##########################################################
 

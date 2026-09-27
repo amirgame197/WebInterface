@@ -17,6 +17,7 @@ THEME_COLORS = {
 
 USERNAME = "admin"
 PASSWORD = "admin"
+AUTH_RPM = 30 # ? The maximum amount of requests-per-minute for authentication requests
 
 # # #################### Server settings ###########################################################
 

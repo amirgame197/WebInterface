@@ -6,11 +6,13 @@ from geventwebsocket.handler import WebSocketHandler
 from datetime import datetime, timedelta
 from gevent.pywsgi import WSGIServer
 from collections import deque
+from gevent.pool import Pool
 from html import escape
 from config import *
 import subprocess
 import threading
 import signal
+import gevent
 import time
 import os
 import re
@@ -23,6 +25,12 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="gevent", max_size
 authenticated_sessions = {}
 session_lock = threading.Lock()
 ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+
+ip_rpms = {} # # {ip: rpm}
+ip_rpms_lock = threading.Lock()
+
+# ? Pool to manage greenlets
+green_pool = Pool(1000)
 
 process = None
 process_lock = threading.Lock()
@@ -67,6 +75,28 @@ def update_session(ip):
     """
     with session_lock:
         authenticated_sessions[ip] = datetime.now()
+
+
+def check_rpm(ip):
+    """Check if an IP's passed max requests per minute
+    """
+    with ip_rpms_lock:
+        count = ip_rpms.get(ip, 0)
+
+        if count > AUTH_RPM:
+            return False
+        
+        ip_rpms[ip] = count + 1
+        return True
+
+
+def reset_rpm():
+    """Reset the ip_rpms dict every minute
+    """
+    while True:
+        gevent.sleep(60)
+        with ip_rpms_lock:
+            ip_rpms.clear()
 
 
 def start_process():
@@ -214,6 +244,11 @@ def authenticate():
         password = data.get('password', '')
         
         client_ip = get_client_ip()
+
+        if not check_rpm(client_ip):
+            print(f"[AUTH] Authentication attempt from IP: {client_ip} RATE LIMITED!", flush=True)
+            return jsonify({'success': False, 'message': 'Rate limited!'}), 429
+
         print(f"[AUTH] Authentication attempt from IP: {client_ip}, Username: {username}", flush=True)
         
         if check_auth(username, password):
@@ -372,5 +407,6 @@ def handle_shutdown_process():
 
 if __name__ == '__main__':
     start_process()
+    green_pool.spawn(reset_rpm)
     print(f"wsgi starting up on http://{LISTEN_IP}:{LISTEN_PORT}", flush=True)
     WSGIServer((LISTEN_IP, LISTEN_PORT), app, handler_class=WebSocketHandler).serve_forever()
